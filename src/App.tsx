@@ -1,680 +1,684 @@
-import React, { useState, useEffect, useRef } from 'react';
-import { Routes, Route, useNavigate } from 'react-router-dom';
-import { Play, Upload, ChevronRight, Check, Clock, ArrowRight, Star } from 'lucide-react';
-import { supabase } from './lib/supabase';
-import { query } from './lib/flowise';
-import toast, { Toaster } from 'react-hot-toast';
-import { Checkout } from './pages/Checkout';
-import { CheckoutSuccess } from './pages/CheckoutSuccess';
-import { CheckoutCancel } from './pages/CheckoutCancel';
+import React, { useState, useRef, useEffect } from 'react';
+import { Play, Upload, Star, Check, X } from 'lucide-react';
+import OpenAI from 'openai';
 
-function AuthModal({ onClose }: { onClose: () => void }) {
-  const [email, setEmail] = useState('');
-  const [password, setPassword] = useState('');
-  const [loading, setLoading] = useState(false);
-  const [authMode, setAuthMode] = useState<'signin' | 'signup'>('signin');
+const openai = new OpenAI({
+  apiKey: import.meta.env.VITE_OPENAI_API_KEY,
+  dangerouslyAllowBrowser: true
+});
 
-  const handleAuth = async (e: React.FormEvent) => {
-    e.preventDefault();
+async function uploadToTmpFiles(file: File): Promise<string> {
+  try {
+    const formData = new FormData();
+    formData.append('file', file);
+
+    const response = await fetch('https://tmpfiles.org/api/v1/upload', {
+      method: 'POST',
+      body: formData
+    });
+
+    if (!response.ok) {
+      throw new Error(`Upload failed: ${response.status}`);
+    }
+
+    const data = await response.json();
     
-    if (!email || !password) {
-      toast.error('Please fill in all fields');
-      return;
+    const match = data.data.url.match(/(\d+)\/([^/]+)$/);
+    if (!match) {
+      throw new Error('Failed to parse upload response URL');
     }
 
-    try {
-      setLoading(true);
-      
-      if (authMode === 'signup') {
-        const { error } = await supabase.auth.signUp({
-          email,
-          password,
-          options: {
-            emailRedirectTo: window.location.origin,
-          },
-        });
-        
-        if (error) throw error;
-        toast.success('Check your email to confirm your account!');
-        onClose();
-      } else {
-        const { error } = await supabase.auth.signInWithPassword({
-          email,
-          password,
-        });
-        
-        if (error) throw error;
-        toast.success('Welcome back!');
-        onClose();
-      }
-    } catch (error: any) {
-      toast.error(error.error_description || error.message);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  return (
-    <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-      <div className="bg-white rounded-xl p-8 max-w-md w-full mx-4">
-        <h2 className="text-2xl font-bold mb-6">
-          {authMode === 'signin' ? 'Sign In' : 'Create Account'}
-        </h2>
-        <form onSubmit={handleAuth} className="space-y-4">
-          <div>
-            <label htmlFor="email" className="block text-sm font-medium text-gray-700 mb-1">
-              Email
-            </label>
-            <input
-              id="email"
-              type="email"
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
-              className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-              placeholder="Enter your email"
-              required
-            />
-          </div>
-          <div>
-            <label htmlFor="password" className="block text-sm font-medium text-gray-700 mb-1">
-              Password
-            </label>
-            <input
-              id="password"
-              type="password"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-              placeholder="Enter your password"
-              required
-            />
-          </div>
-          <button
-            type="submit"
-            disabled={loading}
-            className="w-full bg-blue-600 text-white py-2 rounded-lg hover:bg-blue-700 transition disabled:opacity-50"
-          >
-            {loading ? 'Processing...' : authMode === 'signin' ? 'Sign In' : 'Create Account'}
-          </button>
-        </form>
-        <div className="mt-4 text-center">
-          <button
-            onClick={() => setAuthMode(authMode === 'signin' ? 'signup' : 'signin')}
-            className="text-blue-600 hover:text-blue-700 text-sm"
-          >
-            {authMode === 'signin' ? "Don't have an account? Sign up" : 'Already have an account? Sign in'}
-          </button>
-        </div>
-      </div>
-    </div>
-  );
+    const [, id] = match;
+    const downloadUrl = `https://tmpfiles.org/dl/${id}/${file.name}`;
+    
+    return downloadUrl;
+  } catch (error) {
+    console.error('Error uploading to tmpfiles.org:', error);
+    throw error;
+  }
 }
 
 function App() {
-  const navigate = useNavigate();
-  const [session, setSession] = useState<any>(null);
-  const [loading, setLoading] = useState(false);
-  const [showAuthModal, setShowAuthModal] = useState(false);
-  const [authMode, setAuthMode] = useState<'signin' | 'signup'>('signin');
-  const [usedFreeTrial, setUsedFreeTrial] = useState(false);
-  const [selectedImage, setSelectedImage] = useState<string | null>(null);
-  const [videoId, setVideoId] = useState<string | null>(null);
-  const [videoStatus, setVideoStatus] = useState<string>('');
+  const [previewImage, setPreviewImage] = useState<string | null>(null);
+  const [isDragging, setIsDragging] = useState(false);
+  const [apiResponse, setApiResponse] = useState<string | null>(null);
+  const [flowiseResponse, setFlowiseResponse] = useState<string | null>(null);
+  const [isLoading, setIsLoading] = useState(false);
+  const [uploadedFile, setUploadedFile] = useState<File | null>(null);
+  const [videoStatus, setVideoStatus] = useState<string | null>(null);
+  const [videoUuid, setVideoUuid] = useState<string | null>(null);
   const [videoUrl, setVideoUrl] = useState<string | null>(null);
-  const [description, setDescription] = useState<string>('');
+  const [gifUrl, setGifUrl] = useState<string | null>(null);
+  const [progress, setProgress] = useState(0);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const statusCheckInterval = useRef<number | null>(null);
-  const lastCheckTime = useRef<Date | null>(null);
+  const statusCheckIntervalRef = useRef<number | null>(null);
 
   useEffect(() => {
-    supabase.auth.getSession().then(({ data: { session } }) => {
-      setSession(session);
-      if (session) setShowAuthModal(false);
-    });
-
-    const {
-      data: { subscription },
-    } = supabase.auth.onAuthStateChange((_event, session) => {
-      setSession(session);
-      if (session) setShowAuthModal(false);
-    });
-
     return () => {
-      subscription.unsubscribe();
-      if (statusCheckInterval.current) {
-        clearInterval(statusCheckInterval.current);
+      if (statusCheckIntervalRef.current) {
+        clearInterval(statusCheckIntervalRef.current);
       }
     };
   }, []);
 
-  const checkVideoStatus = async () => {
-    if (!videoId) return;
-
-    const currentTime = new Date();
-    const timeSinceLastCheck = lastCheckTime.current 
-      ? (currentTime.getTime() - lastCheckTime.current.getTime()) / 1000 
-      : 0;
-    
-    console.log(`Checking video status at ${currentTime.toISOString()}`);
-    console.log(`Time since last check: ${timeSinceLastCheck.toFixed(1)} seconds`);
-    
-    lastCheckTime.current = currentTime;
-
-    try {
-      console.log('Checking video status for ID:', videoId);
-      const response = await fetch(`/api/aivideoapi/status?uuid=${videoId}`, {
-        headers: {
-          'Accept': 'application/json',
-          'Authorization': import.meta.env.VITE_AI_VIDEO_API_KEY
-        }
-      });
-
-      if (!response.ok) {
-        console.error('Video status check failed:', response.status, response.statusText);
-        throw new Error('Failed to check video status');
-      }
-
-      const data = await response.json();
-      console.log('Video status response:', data);
-      
-      setVideoStatus(data.status);
-      
-      if (data.video_url) {
-        console.log('Video URL received:', data.video_url);
-        setVideoUrl(data.video_url);
-        if (statusCheckInterval.current) {
-          console.log('Clearing status check interval');
-          clearInterval(statusCheckInterval.current);
-          statusCheckInterval.current = null;
-        }
-        toast.success('Video generation completed!');
-      } else {
-        console.log('Current video status:', data.status);
-      }
-    } catch (error: any) {
-      console.error('Error checking video status:', error);
-      toast.error('Error checking video status');
-    }
-  };
-
-  const handleSignOut = async () => {
-    try {
-      const { error } = await supabase.auth.signOut();
-      if (error) throw error;
-      toast.success('Signed out successfully');
-      setSelectedImage(null);
-      setVideoId(null);
-      setVideoUrl(null);
-      setVideoStatus('');
-      if (statusCheckInterval.current) {
-        clearInterval(statusCheckInterval.current);
-        statusCheckInterval.current = null;
-      }
-    } catch (error: any) {
-      toast.error(error.message);
-    }
-  };
-
-  const getImageDescription = async (imageUrl: string) => {
-    try {
-      console.log('Getting image description for URL:', imageUrl);
-      const result = await query({
-        question: `The mission is to describe the given url, describe an image as final output. Url is: ${imageUrl}`
-      });
-      console.log('Image description result:', result);
-      return result.text || result.message || 'A professional product video';
-    } catch (error) {
-      console.error('Error getting image description:', error);
-      return 'A professional product video with smooth transitions';
-    }
-  };
-
-  const handleImageUpload = async (file: File) => {
-    if (!file.type.startsWith('image/')) {
-      toast.error('Please select an image file');
-      return;
-    }
-
-    if (!session && usedFreeTrial) {
-      setShowAuthModal(true);
-      return;
-    }
-
-    try {
-      setLoading(true);
-      const imageUrl = URL.createObjectURL(file);
-      setSelectedImage(imageUrl);
-
-      if (!session) {
-        setUsedFreeTrial(true);
-      }
-
-      console.log('Uploading image to tmpfiles.org');
-      const formData = new FormData();
-      formData.append('file', file);
-      
-      const uploadResponse = await fetch('https://tmpfiles.org/api/v1/upload', {
-        method: 'POST',
-        body: formData,
-      });
-      
-      if (!uploadResponse.ok) {
-        console.error('Image upload failed:', uploadResponse.status, uploadResponse.statusText);
-        throw new Error('Failed to upload image');
-      }
-      
-      const uploadData = await uploadResponse.json();
-      console.log('Image upload response:', uploadData);
-      
-      const downloadUrl = uploadData.data.url.replace('https://tmpfiles.org/', 'https://tmpfiles.org/dl/');
-      console.log('Image download URL:', downloadUrl);
-      
-      const imageDescription = await getImageDescription(downloadUrl);
-      setDescription(imageDescription);
-      console.log('Generated description:', imageDescription);
-
-      const apiKey = import.meta.env.VITE_AI_VIDEO_API_KEY;
-      if (!apiKey) {
-        throw new Error('API key is not configured');
-      }
-
-      console.log('Calling AI Video API for video generation');
-      const response = await fetch('/api/aivideoapi/runway/generate/imageDescription', {
-        method: 'POST',
-        headers: {
-          'Accept': 'application/json',
-          'Content-Type': 'application/json',
-          'Authorization': apiKey
-        },
-        body: JSON.stringify({
-          text_prompt: imageDescription,
-          model: 'gen3',
-          flip: true,
-          img_prompt: downloadUrl
-        })
-      });
-
-      if (!response.ok) {
-        const errorData = await response.json().catch(() => ({}));
-        console.error('Video generation failed:', response.status, response.statusText, errorData);
-        throw new Error(errorData.message || 'Failed to generate video');
-      }
-
-      const videoData = await response.json();
-      console.log('Video API response:', videoData);
-      
-      if (videoData.uuid) {
-        console.log('Video generation started with ID:', videoData.uuid);
-        setVideoId(videoData.uuid);
-        toast.success('Video generation started!');
-        
-        if (statusCheckInterval.current) {
-          clearInterval(statusCheckInterval.current);
-        }
-        lastCheckTime.current = new Date();
-        statusCheckInterval.current = setInterval(checkVideoStatus, 30000);
-        checkVideoStatus();
-      } else {
-        throw new Error('No video ID received from Video API');
-      }
-    } catch (error: any) {
-      console.error('Error processing image:', error);
-      toast.error(`Error processing image: ${error.message}`);
-      setSelectedImage(null);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const handleImageDrop = async (e: React.DragEvent<HTMLDivElement>) => {
+  const handleDragOver = (e: React.DragEvent) => {
     e.preventDefault();
+    e.stopPropagation();
+    setIsDragging(true);
+  };
+
+  const handleDragLeave = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragging(false);
+  };
+
+  const handleDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragging(false);
+    
     const file = e.dataTransfer.files[0];
     if (file) {
-      handleImageUpload(file);
+      handleFile(file);
     }
   };
 
-  const handleFileSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleFileInput = (e: React.ChangeEvent<HTMLInputElement>) => {
+    e.stopPropagation();
     const file = e.target.files?.[0];
     if (file) {
-      handleImageUpload(file);
+      handleFile(file);
     }
   };
 
-  const handleUploadClick = () => {
-    fileInputRef.current?.click();
+  const handleFile = async (file: File) => {
+    if (!file.type.startsWith('image/')) {
+      alert('Please upload an image file');
+      return;
+    }
+
+    setUploadedFile(file);
+    const reader = new FileReader();
+    reader.onloadend = () => {
+      setPreviewImage(reader.result as string);
+      setApiResponse(null);
+      setFlowiseResponse(null);
+      setVideoStatus(null);
+      setVideoUuid(null);
+      setVideoUrl(null);
+      setGifUrl(null);
+      setProgress(0);
+      if (statusCheckIntervalRef.current) {
+        clearInterval(statusCheckIntervalRef.current);
+        statusCheckIntervalRef.current = null;
+      }
+    };
+    reader.readAsDataURL(file);
   };
 
-  const handleStartFreeTrial = () => {
-    navigate('/checkout');
+  const clearPreview = (e: React.MouseEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setPreviewImage(null);
+    setApiResponse(null);
+    setFlowiseResponse(null);
+    setUploadedFile(null);
+    setVideoStatus(null);
+    setVideoUuid(null);
+    setVideoUrl(null);
+    setGifUrl(null);
+    setProgress(0);
+    if (fileInputRef.current) {
+      fileInputRef.current.value = '';
+    }
+    if (statusCheckIntervalRef.current) {
+      clearInterval(statusCheckIntervalRef.current);
+      statusCheckIntervalRef.current = null;
+    }
+  };
+
+  const improveDescription = async (description: string) => {
+    try {
+      console.log('Sending description to Flowise:', description);
+      const response = await fetch('https://hebed-workspace.onrender.com/api/v1/prediction/1ee6a47e-8ba8-4e95-8c1e-8289f5629cca', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ question: description }),
+      });
+
+      if (!response.ok) {
+        throw new Error(`Flowise API error: ${response.status}`);
+      }
+
+      const result = await response.json();
+      console.log('Flowise response:', result);
+      const responseText = result?.text || result?.question || JSON.stringify(result);
+      setFlowiseResponse(responseText);
+      return responseText;
+    } catch (error) {
+      console.error('Error improving description:', error);
+      return description;
+    }
+  };
+
+  const checkVideoStatus = async (uuid: string) => {
+    const url = `https://runwayml.p.rapidapi.com/status?uuid=${uuid}`;
+    const options = {
+      method: 'GET',
+      headers: {
+        'x-rapidapi-key': import.meta.env.VITE_RAPIDAPI_KEY,
+        'x-rapidapi-host': 'runwayml.p.rapidapi.com'
+      }
+    };
+
+    try {
+      const now = new Date().toLocaleTimeString();
+      console.log(`[${now}] Checking video status for UUID: ${uuid}`);
+      const response = await fetch(url, options);
+      const result = await response.text();
+      console.log(`[${now}] Video status result:`, result);
+      
+      const status = JSON.parse(result);
+      setVideoStatus(result);
+
+      if (status.progress !== undefined) {
+        setProgress(status.progress * 100);
+      }
+
+      // Update to handle both 'url' and 'video_url' fields
+      if (status.url) {
+        setVideoUrl(status.url);
+      } else if (status.video_url) {
+        setVideoUrl(status.video_url);
+      }
+
+      if (status.gif_url) {
+        setGifUrl(status.gif_url);
+      }
+
+      if (
+        status.status === 'success' ||
+        status.progress === 1 ||
+        status.state === 'completed'
+      ) {
+        console.log(`[${now}] Video processing completed.`);
+        setProgress(100);
+        if (statusCheckIntervalRef.current) {
+          clearInterval(statusCheckIntervalRef.current);
+          statusCheckIntervalRef.current = null;
+        }
+      } else if (status.state === 'failed') {
+        console.log(`[${now}] Video processing failed`);
+        if (statusCheckIntervalRef.current) {
+          clearInterval(statusCheckIntervalRef.current);
+          statusCheckIntervalRef.current = null;
+        }
+      } else {
+        console.log(`[${now}] Video still processing. Progress: ${status.progress * 100}%`);
+      }
+    } catch (error) {
+      const now = new Date().toLocaleTimeString();
+      console.error(`[${now}] Error checking video status:`, error);
+      if (statusCheckIntervalRef.current) {
+        clearInterval(statusCheckIntervalRef.current);
+        statusCheckIntervalRef.current = null;
+      }
+    }
+  };
+
+  const startStatusChecking = (uuid: string) => {
+    const now = new Date().toLocaleTimeString();
+    console.log(`[${now}] Starting status checks for UUID: ${uuid}`);
+    
+    if (statusCheckIntervalRef.current) {
+      console.log(`[${now}] Clearing existing status check interval`);
+      clearInterval(statusCheckIntervalRef.current);
+    }
+
+    setProgress(0);
+
+    console.log(`[${now}] Performing initial status check`);
+    checkVideoStatus(uuid);
+
+    console.log(`[${now}] Setting up 30-second interval for status checks`);
+    statusCheckIntervalRef.current = window.setInterval(() => {
+      checkVideoStatus(uuid);
+    }, 30000);
+  };
+
+  const handleDownload = (url: string | null, type: 'mp4' | 'gif') => {
+    if (!url) {
+      console.error(`No ${type} URL available`);
+      return;
+    }
+
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `video.${type}`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  };
+
+  const generateVideo = async (description: string, imageFile: File) => {
+    const url = 'https://runwayml.p.rapidapi.com/generate/imageDescription';
+    
+    const textPrompt = typeof description === 'object' ? JSON.stringify(description) : String(description);
+    
+    try {
+      const imageUrl = await uploadToTmpFiles(imageFile);
+      console.log('Image uploaded, download URL:', imageUrl);
+
+      const options = {
+        method: 'POST',
+        headers: {
+          'x-rapidapi-key': import.meta.env.VITE_RAPIDAPI_KEY,
+          'x-rapidapi-host': 'runwayml.p.rapidapi.com',
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          text_prompt: textPrompt,
+          img_prompt: imageUrl,
+          model: 'gen3',
+          image_as_end_frame: false,
+          flip: true,
+          motion: 5,
+          seed: 0,
+          callback_url: '',
+          time: 10
+        })
+      };
+
+      console.log('Generating video with description:', textPrompt);
+      const response = await fetch(url, options);
+      
+      if (!response.ok) {
+        const errorData = await response.json();
+        console.error('Video generation error:', errorData);
+        throw new Error(`API error: ${response.status}`);
+      }
+      
+      const result = await response.text();
+      console.log('Video generation result:', result);
+      
+      const { uuid } = JSON.parse(result);
+      if (uuid) {
+        setVideoUuid(uuid);
+        startStatusChecking(uuid);
+      }
+    } catch (error) {
+      console.error('Error generating video:', error);
+      setVideoStatus('Failed to generate video. Please try again.');
+    }
+  };
+
+  const handleConversion = async (e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (!uploadedFile || !previewImage) return;
+
+    setIsLoading(true);
+    try {
+      const completion = await openai.chat.completions.create({
+        model: "gpt-4o",
+        messages: [
+          {
+            role: "user",
+            content: [
+              { type: "text", text: "What does this image show?" },
+              {
+                type: "image_url",
+                image_url: {
+                  url: previewImage,
+                  detail: "high"
+                }
+              }
+            ]
+          }
+        ],
+        max_tokens: 500
+      });
+
+      const initialDescription = completion.choices[0].message.content;
+      setApiResponse(initialDescription);
+      console.log('OpenAI response:', initialDescription);
+
+      const improvedDescription = await improveDescription(initialDescription || '');
+      
+      if (improvedDescription) {
+        await generateVideo(improvedDescription, uploadedFile);
+      }
+    } catch (error) {
+      console.error('Error:', error);
+      setApiResponse('Failed to process image. Please try again.');
+    } finally {
+      setIsLoading(false);
+    }
   };
 
   return (
-    <div className="min-h-screen bg-gradient-to-b from-gray-50 to-white">
-      <Toaster position="top-right" />
-      {showAuthModal && <AuthModal onClose={() => setShowAuthModal(false)} />}
-      
-      <Routes>
-        <Route path="/checkout" element={<Checkout />} />
-        <Route path="/checkout/success" element={<CheckoutSuccess />} />
-        <Route path="/checkout/cancel" element={<CheckoutCancel />} />
-        <Route path="/" element={
-          <>
-            <nav className="fixed top-0 w-full bg-white/80 backdrop-blur-md z-50 border-b border-gray-100">
-              <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-                <div className="flex justify-between items-center h-16">
-                  <div className="flex items-center">
-                    <Play className="w-8 h-8 text-blue-600" />
-                    <span className="ml-2 text-xl font-bold text-gray-900">VideoSnap AI</span>
-                  </div>
-                  <div className="hidden md:flex items-center space-x-8">
-                    <a href="#features" className="text-gray-600 hover:text-gray-900">Features</a>
-                    <a href="#pricing" className="text-gray-600 hover:text-gray-900">Pricing</a>
-                    <a href="#testimonials" className="text-gray-600 hover:text-gray-900">Testimonials</a>
-                    {session ? (
-                      <button
-                        onClick={handleSignOut}
-                        className="bg-gray-200 text-gray-800 px-4 py-2 rounded-lg hover:bg-gray-300 transition"
-                      >
-                        Sign Out
-                      </button>
-                    ) : (
-                      <button
-                        onClick={handleStartFreeTrial}
-                        className="bg-blue-600 text-white px-4 py-2 rounded-lg hover:bg-blue-700 transition"
-                      >
-                        Start Free Trial
-                      </button>
-                    )}
-                  </div>
-                </div>
-              </div>
-            </nav>
+    <div className="min-h-screen flex flex-col">
+      <header className="bg-purple-900 py-4 px-6">
+        <nav className="max-w-7xl mx-auto flex justify-between items-center">
+          <div className="flex items-center space-x-2">
+            <Play className="text-purple-200" size={24} />
+            <span className="text-white text-xl font-bold">VideoSnap AI</span>
+          </div>
+        </nav>
+      </header>
 
-            <section className="pt-32 pb-24 px-4 sm:px-6 lg:px-8">
-              <div className="max-w-7xl mx-auto">
-                <div className="bg-blue-50 rounded-full px-6 py-2 inline-flex items-center mb-8">
-                  <Clock className="w-4 h-4 text-blue-600 mr-2" />
-                  <span className="text-blue-900 font-medium">Launch Special: First 500 users get 50% extra video credits - 43 spots remaining</span>
-                </div>
+      <main className="flex-grow bg-gradient-to-b from-purple-50 to-white">
+        <div className="max-w-7xl mx-auto px-6 py-16">
+          <div className="text-center mb-8 bg-purple-100 p-3 rounded-full inline-block mx-auto animate-fade-in">
+            <p className="text-purple-700">
+              <span className="font-semibold">Launch Special:</span> First 500 users get 50% extra video credits - 43 spots remaining
+            </p>
+          </div>
 
-                <div className="text-center">
-                  <h1 className="text-4xl sm:text-5xl lg:text-6xl font-bold text-gray-900 leading-tight mb-6">
-                    Transform Static Product Images Into
-                    <span className="text-blue-600"> Sales-Converting Videos</span>
-                    <br />In Seconds
-                  </h1>
-                  <p className="text-xl text-gray-600 mb-12 max-w-3xl mx-auto">
-                    Boost your conversion rates by up to 23% with AI-generated product videos.
-                    No video editing skills required.
-                  </p>
+          <div className="text-center mb-16 animate-fade-in" style={{animationDelay: '0.2s'}}>
+            <h1 className="text-5xl font-bold mb-6">
+              Transform Static Product Images Into{' '}
+              <span className="text-gradient">Sales-Converting Videos</span>
+              <br />In Seconds
+            </h1>
+            <p className="text-purple-800 text-xl mb-8">
+              Boost your conversion rates by up to 23% with AI-generated product videos.
+              <br />No video editing skills required.
+            </p>
+          </div>
 
-                  <div className="flex flex-col sm:flex-row justify-center gap-4 mb-16">
-                    <button
-                      onClick={() => !session && setShowAuthModal(true)}
-                      className="inline-flex items-center px-8 py-4 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition text-lg font-medium"
-                    >
-                      Boost Your Sales With Video Now
-                      <ChevronRight className="ml-2 w-5 h-5" />
-                    </button>
-                    <button className="inline-flex items-center px-8 py-4 bg-white text-gray-900 rounded-lg border-2 border-gray-200 hover:border-gray-300 transition text-lg font-medium">
-                      Watch Demo
-                      <Play className="ml-2 w-5 h-5" />
-                    </button>
-                  </div>
-
-                  <div
-                    className="max-w-3xl mx-auto bg-white rounded-2xl shadow-xl p-8 border-2 border-dashed border-gray-200 cursor-pointer"
-                    onDragOver={(e) => e.preventDefault()}
-                    onDrop={handleImageDrop}
-                    onClick={handleUploadClick}
+          <div className="max-w-2xl mx-auto animate-fade-in" style={{animationDelay: '0.4s'}}>
+            <div 
+              className={`relative border-2 border-dashed rounded-xl p-12 text-center transition-colors duration-300 bg-white cursor-pointer
+                ${isDragging ? 'border-purple-600 bg-purple-50' : 'border-purple-200 hover:border-purple-400'}`}
+              onDragOver={handleDragOver}
+              onDragLeave={handleDragLeave}
+              onDrop={handleDrop}
+              onClick={() => fileInputRef.current?.click()}
+            >
+              <input
+                type="file"
+                ref={fileInputRef}
+                onChange={handleFileInput}
+                accept="image/*"
+                className="hidden"
+              />
+              
+              {previewImage ? (
+                <div className="relative" onClick={e => e.stopPropagation()}>
+                  <button
+                    onClick={clearPreview}
+                    className="absolute -top-4 -right-4 bg-red-500 text-white p-1 rounded-full hover:bg-red-600 transition-colors"
                   >
-                    <input
-                      type="file"
-                      ref={fileInputRef}
-                      onChange={handleFileSelect}
-                      accept="image/*"
-                      className="hidden"
-                    />
-                    <div className="flex flex-col items-center">
-                      {selectedImage ? (
-                        <div className="w-full max-w-md">
-                          <img
-                            src={selectedImage}
-                            alt="Selected product"
-                            className="w-full h-auto rounded-lg mb-4"
-                          />
-                          <div className="w-full bg-gray-50 rounded-lg p-4">
-                            <div className="flex items-center justify-between text-sm text-gray-500">
-                              <span>{videoUrl ? 'Video ready!' : videoStatus || 'Processing your video...'}</span>
-                              {!videoUrl && (
-                                <div className="animate-pulse bg-blue-100 h-2 w-48 rounded"></div>
+                    <X size={20} />
+                  </button>
+                  <img
+                    src={previewImage}
+                    alt="Preview"
+                    className="max-h-64 mx-auto rounded-lg shadow-lg"
+                  />
+                  <button 
+                    className={`btn-primary mt-6 ${isLoading ? 'opacity-50 cursor-not-allowed' : ''}`}
+                    onClick={handleConversion}
+                    disabled={isLoading}
+                  >
+                    {isLoading ? 'Processing...' : 'Generate Video'}
+                  </button>
+                  
+                  {apiResponse && (
+                    <div className="mt-6 p-4 bg-purple-50 rounded-lg text-left">
+                      <h4 className="font-semibold text-purple-900 mb-2">Initial Description:</h4>
+                      <p className="text-purple-800 whitespace-pre-wrap">{apiResponse}</p>
+                    </div>
+                  )}
+
+                  {flowiseResponse && (
+                    <div className="mt-4 p-4 bg-green-50 rounded-lg text-left">
+                      <h4 className="font-semibold text-green-900 mb-2">Improved Description:</h4>
+                      <p className="text-green-800 whitespace-pre-wrap">{flowiseResponse}</p>
+                    </div>
+                  )}
+
+                  {videoStatus && (
+                    <div className="mt-6 bg-white rounded-2xl border border-blue-100 p-6 shadow-sm">
+                      <h3 className="text-2xl font-bold text-gray-900 mb-6">Video Status</h3>
+                      
+                      {(() => {
+                        try {
+                          const statusData = JSON.parse(videoStatus);
+                          return (
+                            <div className="space-y-4">
+                              <div className="flex justify-between items-center py-3 border-b border-gray-100">
+                                <span className="font-medium text-gray-700">UUID</span>
+                                <span className="font-mono text-sm text-gray-600">{statusData.uuid}</span>
+                              </div>
+                              
+                              <div className="flex justify-between items-center py-3 border-b border-gray-100">
+                                <span className="font-medium text-gray-700">Status</span>
+                                <span className={`px-3 py-1 rounded-full text-sm ${
+                                  statusData.status === 'success' 
+                                    ? 'bg-green-100 text-green-700' 
+                                    : 'bg-blue-100 text-blue-700'
+                                }`}>
+                                  {statusData.status}
+                                </span>
+                              </div>
+
+                              <div className="flex justify-between items-center py-3 border-b border-gray-100">
+                                <span className="font-medium text-gray-700">Progress</span>
+                                <div className="flex items-center">
+                                  <div className="w-48 bg-gray-200 rounded-full h-2 mr-3">
+                                    <div 
+                                      className="bg-blue-600 h-2 rounded-full transition-all duration-300" 
+                                      style={{ width: `${progress}%` }}
+                                    ></div>
+                                  </div>
+                                  <span className="text-sm text-gray-600">
+                                    {Math.round(progress)}%
+                                  </span>
+                                </div>
+                              </div>
+
+                              {videoUrl && (
+                                <div className="flex justify-between items-center py-3 border-b border-gray-100">
+                                  <span className="font-medium text-gray-700">MP4 URL</span>
+                                  <button 
+                                    onClick={() => handleDownload(videoUrl, 'mp4')}
+                                    className="text-blue-600 hover:text-blue-700 text-sm underline"
+                                  >
+                                    Download MP4
+                                  </button>
+                                </div>
+                              )}
+
+                              {gifUrl && (
+                                <div className="flex justify-between items-center py-3 border-b border-gray-100">
+                                  <span className="font-medium text-gray-700">GIF URL</span>
+                                  <button 
+                                    onClick={() => handleDownload(gifUrl, 'gif')}
+                                    className="text-blue-600 hover:text-blue-700 text-sm underline"
+                                  >
+                                    Download GIF
+                                  </button>
+                                </div>
+                              )}
+
+                              {(statusData.status === 'success' || statusData.progress === 1) && (
+                                <div className="mt-6 p-4 bg-green-50 rounded-lg border border-green-100">
+                                  <div className="flex items-center">
+                                    <div className="w-12 h-12 bg-green-100 rounded-full flex items-center justify-center mr-4">
+                                      <Check className="w-6 h-6 text-green-600" />
+                                    </div>
+                                    <div>
+                                      <h4 className="font-semibold text-green-900">Video Generated Successfully!</h4>
+                                      <p className="text-green-700 text-sm mt-1">
+                                        Your video is ready to download in both MP4 and GIF formats
+                                      </p>
+                                    </div>
+                                  </div>
+                                  <div className="mt-4 flex space-x-3">
+                                    <button
+                                      onClick={() => handleDownload(videoUrl, 'mp4')}
+                                      className="flex-1 bg-green-600 text-white px-4 py-2 rounded-lg hover:bg-green-700 transition-colors text-center"
+                                    >
+                                      Download MP4
+                                    </button>
+                                    <button
+                                      onClick={() => handleDownload(gifUrl, 'gif')}
+                                      className="flex-1 bg-white text-green-600 px-4 py-2 rounded-lg border border-green-200 hover:bg-green-50 transition-colors text-center"
+                                    >
+                                      Download GIF
+                                    </button>
+                                  </div>
+                                </div>
                               )}
                             </div>
-                            {description && (
-                              <p className="mt-2 text-sm text-gray-600">Description: {description}</p>
-                            )}
-                            {videoUrl && (
-                              <div className="mt-4">
-                                <video
-                                  src={videoUrl}
-                                  controls
-                                  className="w-full rounded-lg"
-                                >
-                                  Your browser does not support the video tag.
-                                </video>
-                              </div>
-                            )}
-                          </div>
-                        </div>
-                      ) : (
-                        <>
-                          <Upload className="w-12 h-12 text-blue-600 mb-4" />
-                          <h3 className="text-xl font-semibold mb-2">
-                            {session ? 'Drop your product image here' : 'Try it now - Drop your product image here'}
-                          </h3>
-                          <p className="text-gray-600 mb-6">or click to upload</p>
-                          {(!session && usedFreeTrial) && (
-                            <p className="text-sm text-blue-600 mb-4">
-                              Sign up to continue generating videos!
-                            </p>
-                          )}
-                        </>
-                      )}
+                          );
+                        } catch (e) {
+                          return (
+                            <div className="text-gray-600 whitespace-pre-wrap">
+                              {videoStatus}
+                            </div>
+                          );
+                        }
+                      })()}
                     </div>
-                  </div>
-
-                  <div className="mt-12">
-                    <p className="text-gray-500 mb-4">Trusted by 2,743+ e-commerce stores</p>
-                    <div className="flex justify-center items-center space-x-8 opacity-50">
-                      <img src="https://images.unsplash.com/photo-1622675363311-3e1904dc1885?auto=format&fit=crop&w=100&q=80" alt="Company logo" className="h-8" />
-                      <img src="https://images.unsplash.com/photo-1622675363311-3e1904dc1885?auto=format&fit=crop&w=100&q=80" alt="Company logo" className="h-8" />
-                      <img src="https://images.unsplash.com/photo-1622675363311-3e1904dc1885?auto=format&fit=crop&w=100&q=80" alt="Company logo" className="h-8" />
-                    </div>
-                  </div>
+                  )}
                 </div>
-              </div>
-            </section>
+              ) : (
+                <>
+                  <Upload className="mx-auto mb-4 text-purple-400" size={48} />
+                  <h3 className="text-xl font-semibold mb-2 text-purple-900">
+                    Try it now - Drop your product image here
+                  </h3>
+                  <p className="text-purple-600">or click to upload</p>
+                </>
+              )}
+            </div>
+          </div>
+        </div>
 
-            <section className="py-24 bg-gray-50">
-              <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-                <h2 className="text-3xl font-bold text-center mb-12">Loved by E-commerce Leaders</h2>
-                <div className="grid md:grid-cols-3 gap-8">
-                  <div className="bg-white p-8 rounded-xl shadow-sm">
-                    <div className="flex items-center mb-4">
-                      <img
-                        src="https://images.unsplash.com/photo-1494790108377-be9c29b29330?auto=format&fit=crop&w=100&q=80"
-                        alt="Sarah Chen"
-                        className="w-12 h-12 rounded-full object-cover"
-                      />
-                      <div className="ml-4">
-                        <h4 className="font-semibold">Sarah test</h4>
-                        <p className="text-sm text-gray-600">Founder of StyleHub</p>
-                      </div>
-                    </div>
-                    <div className="flex mb-4">
-                      {[...Array(5)].map((_, i) => (
-                        <Star key={i} className="w-5 h-5 text-yellow-400 fill-current" />
-                      ))}
-                    </div>
-                    <p className="text-gray-600">"VideoSnap AI increased our conversion rate by 19% in the first month. The ROI is incredible."</p>
+        <div className="bg-purple-50 py-16">
+          <div className="max-w-7xl mx-auto px-6">
+            <h2 className="text-3xl font-bold text-center mb-12 text-purple-900">Loved by E-commerce Leaders</h2>
+            <div className="grid md:grid-cols-3 gap-8">
+              {[
+                {
+                  name: "Sarah Mckeen",
+                  photo: "https://images.unsplash.com/photo-1494790108377-be9c29b29330?w=50&h=50&fit=crop",
+                  quote: "VideoSnap AI increased our conversion rate by 19% in the first month. The ROI is incredible."
+                },
+                {
+                  name: "Marcus Denoy",
+                  photo: "https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?w=50&h=50&fit=crop",
+                  quote: "We've cut our video production costs by 78% while increasing engagement by 31%."
+                },
+                {
+                  name: "Jennifer Finrech",
+                  photo: "https://images.unsplash.com/photo-1438761681033-6461ffad8d80?w=50&h=50&fit=crop",
+                  quote: "Our product page bounce rate dropped by 42% after implementing these videos."
+                }
+              ].map((testimonial, i) => (
+                <div 
+                  key={i}
+                  className="bg-white p-6 rounded-xl shadow-sm hover:shadow-md transition-shadow duration-300 animate-fade-in"
+                  style={{animationDelay: `${0.2 * i}s`}}
+                >
+                  <div className="flex items-center mb-4">
+                    <img
+                      src={testimonial.photo}
+                      alt={testimonial.name}
+                      className="w-12 h-12 rounded-full mr-4"
+                    />
+                    <h4 className="font-semibold text-purple-900">{testimonial.name}</h4>
                   </div>
-
-                  <div className="bg-white p-8 rounded-xl shadow-sm">
-                    <div className="flex items-center mb-4">
-                      <img
-                        src="https://images.unsplash.com/photo-1472099645785-5658abf4ff4e?auto=format&fit=crop&w=100&q=80"
-                        alt="Marcus Johnson"
-                        className="w-12 h-12 rounded-full object-cover"
-                      />
-                      <div className="ml-4">
-                        <h4 className="font-semibold">Marcus Johnson</h4>
-                        <p className="text-sm text-gray-600">Marketing Director at TechGadgets</p>
-                      </div>
-                    </div>
-                    <div className="flex mb-4">
-                      {[...Array(5)].map((_, i) => (
-                        <Star key={i} className="w-5 h-5 text-yellow-400 fill-current" />
-                      ))}
-                    </div>
-                    <p className="text-gray-600">"We've cut our video production costs by 78% while increasing engagement by 31%."</p>
+                  <div className="flex mb-4">
+                    {[1,2,3,4,5].map((star) => (
+                      <Star key={star} className="text-purple-400 fill-current" size={20} />
+                    ))}
                   </div>
-
-                  <div className="bg-white p-8 rounded-xl shadow-sm">
-                    <div className="flex items-center mb-4">
-                      <img
-                        src="https://images.unsplash.com/photo-1487412720507-e7ab37603c6f?auto=format&fit=crop&w=100&q=80"
-                        alt="Jennifer Lopez"
-                        className="w-12 h-12 rounded-full object-cover"
-                      />
-                      <div className="ml-4">
-                        <h4 className="font-semibold">Jennifer Lopez</h4>
-                        <p className="text-sm text-gray-600">E-commerce Manager at BeautyEssentials</p>
-                      </div>
-                    </div>
-                    <div className="flex mb-4">
-                      {[...Array(5)].map((_, i) => (
-                        <Star key={i} className="w-5 h-5 text-yellow-400 fill-current" />
-                      ))}
-                    </div>
-                    <p className="text-gray-600">"Our product page bounce rate dropped by 42% after implementing these videos."</p>
-                  </div>
+                  <p className="text-purple-800">{testimonial.quote}</p>
                 </div>
-              </div>
-            </section>
+              ))}
+            </div>
+          </div>
+        </div>
 
-            <section className="py-24 px-4 sm:px-6 lg:px-8">
-              <div className="max-w-7xl mx-auto">
-                <div className="text-center mb-16">
-                  <h2 className="text-3xl font-bold mb-4">Simple, Transparent Pricing</h2>
-                  <p className="text-xl text-gray-600">Start free and scale as you grow</p>
-                </div>
-
-                <div className="grid md:grid-cols-3 gap-8">
-                  <div className="bg-white p-8 rounded-xl shadow-sm border-2 border-gray-100">
-                    <h3 className="text-2xl font-bold mb-4">Starter</h3>
-                    <div className="mb-6">
-                      <span className="text-4xl font-bold">$29</span>
-                      <span className="text-gray-600">/month</span>
-                    </div>
-                    <ul className="space-y-4 mb-8">
-                      <li className="flex items-center">
-                        <Check className="w-5 h-5 text-green-500 mr-2" />
-                        <span>20 videos per month</span>
-                      </li>
-                      <li className="flex items-center">
-                        <Check className="w-5 h-5 text-green-500 mr-2" />
-                        <span>Basic templates</span>
-                      </li>
-                      <li className="flex items-center">
-                        <Check className="w-5 h-5 text-green-500 mr-2" />
-                        <span>Email support</span>
-                      </li>
-                    </ul>
-                    <button
-                      onClick={() => !session && setShowAuthModal(true)}
-                      className="w-full py-3 bg-gray-900 text-white rounded-lg hover:bg-gray-800 transition"
-                    >
-                      Start Free Trial
-                    </button>
-                  </div>
-
-                  <div className="bg-white p-8 rounded-xl shadow-xl border-2 border-blue-600 relative">
-                    <div className="absolute top-0 right-0 bg-blue-600 text-white px-4 py-1 rounded-bl-lg rounded-tr-lg text-sm font-medium">
+        <div className="py-16 bg-white">
+          <div className="max-w-7xl mx-auto px-6">
+            <h2 className="text-3xl font-bold text-center mb-4 text-purple-900">Simple, Transparent Pricing</h2>
+            <p className="text-center text-purple-600 mb-12">Subscribe and scale as you grow</p>
+            <div className="grid md:grid-cols-3 gap-8">
+              {[
+                {
+                  name: "BASIC",
+                  price: "39.90",
+                  features: ["50 videos per month", "Basic templates", "Email support"],
+                  url: "https://buy.stripe.com/4gwdSU6cOg6TfK03cf"
+                },
+                {
+                  name: "PRO",
+                  price: "79.90",
+                  popular: true,
+                  features: ["250 videos per month", "Premium templates", "Priority support", "Custom branding"],
+                  url: "https://buy.stripe.com/3csdSU30Cf2P41ieUY"
+                },
+                {
+                  name: "MEGA",
+                  price: "119.90",
+                  features: ["750 videos per month", "All premium features", "24/7 priority support", "API access", "White-label solution"],
+                  url: "https://buy.stripe.com/14kbKMdFg6wj2XebIN"
+                }
+              ].map((plan, i) => (
+                <div 
+                  key={i}
+                  className={`pricing-card relative ${plan.popular ? 'border-purple-400 shadow-lg' : ''}`}
+                  style={{animationDelay: `${0.2 * i}s`}}
+                >
+                  {plan.popular && (
+                    <span className="bg-purple-600 text-white px-3 py-1 rounded-full text-sm absolute -top-3 right-4">
                       Most Popular
-                    </div>
-                    <h3 className="text-2xl font-bold mb-4">Business</h3>
-                    <div className="mb-6">
-                      <span className="text-4xl font-bold">$79</span>
-                      <span className="text-gray-600">/month</span>
-                    </div>
-                    <ul className="space-y-4 mb-8">
-                      <li className="flex items-center">
-                        <Check className="w-5 h-5 text-green-500 mr-2" />
-                        <span>100 videos per month</span>
-                      </li>
-                      <li className="flex items-center">
-                        <Check className="w-5 h-5 text-green-500 mr-2" />
-                        <span>Premium templates</span>
-                      </li>
-                      <li className="flex items-center">
-                        <Check className="w-5 h-5 text-green-500 mr-2" />
-                        <span>Priority support</span>
-                      </li>
-                      <li className="flex items-center">
-                        <Check className="w-5 h-5 text-green-500 mr-2" />
-                        <span>Custom branding</span>
-                      </li>
-                    </ul>
-                    <button
-                      onClick={() => !session && setShowAuthModal(true)}
-                      className="w-full py-3 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition"
-                    >
-                      Start Free Trial
-                    </button>
+                    </span>
+                  )}
+                  <h3 className="text-xl font-semibold mb-2 text-purple-900">{plan.name}</h3>
+                  <div className="mb-6">
+                    <span className="text-4xl font-bold text-purple-900">${plan.price}</span>
+                    <span className="text-purple-600">/month</span>
                   </div>
-
-                  <div className="bg-white p-8 rounded-xl shadow-sm border-2 border-gray-100">
-                    <h3 className="text-2xl font-bold mb-4">Agency</h3>
-                    <div className="mb-6">
-                      <span className="text-4xl font-bold">$199</span>
-                      <span className="text-gray-600">/month</span>
-                    </div>
-                    <ul className="space-y-4 mb-8">
-                      <li className="flex items-center">
-                        <Check className="w-5 h-5 text-green-500 mr-2" />
-                        <span>500 videos per month</span>
+                  <ul className="space-y-4 mb-8">
+                    {plan.features.map((feature, j) => (
+                      <li key={j} className="flex items-center">
+                        <Check className="text-purple-500 mr-2" size={20} />
+                        <span className="text-purple-800">{feature}</span>
                       </li>
-                      <li className="flex items-center">
-                        <Check className="w-5 h-5 text-green-500 mr-2" />
-                        <span>All premium features</span>
-                      </li>
-                      <li className="flex items-center">
-                        <Check className="w-5 h-5 text-green-500 mr-2" />
-                        <span>24/7 priority support</span>
-                      </li>
-                      <li className="flex items-center">
-                        <Check className="w-5 h-5 text-green-500 mr-2" />
-                        <span>API access</span>
-                      </li>
-                      <li className="flex items-center">
-                        <Check className="w-5 h-5 text-green-500 mr-2" />
-                        <span>White-label solution</span>
-                      </li>
-                    </ul>
-                    <button
-                      onClick={() => !session && setShowAuthModal(true)}
-                      className="w-full py-3 bg-gray-900 text-white rounded-lg hover:bg-gray-800 transition"
-                    >
-                      Start Free Trial
-                    </button>
-                  </div>
+                    ))}
+                  </ul>
+                  <button 
+                    className={`w-full ${plan.popular ? 'btn-primary' : 'btn-secondary'}`}
+                    onClick={() => window.location.href = plan.url}
+                  >
+                    Subscribe
+                  </button>
                 </div>
-              </div>
-            </section>
-          </>
-        } />
-      </Routes>
+              ))}
+            </div>
+          </div>
+        </div>
+      </main>
+
+      <footer className="bg-purple-900 text-white py-8 px-6">
+        <div className="max-w-7xl mx-auto flex justify-between items-center">
+          <div className="flex items-center space-x-2">
+            <Play size={20} className="text-purple-200" />
+            <span className="font-semibold">VideoSnap AI</span>
+          </div>
+          <div className="text-sm text-purple-200">
+            © 2024 VideoSnap AI. All rights reserved.
+          </div>
+        </div>
+      </footer>
     </div>
   );
 }
