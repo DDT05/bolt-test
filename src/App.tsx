@@ -188,7 +188,6 @@ function App() {
         setProgress(status.progress * 100);
       }
 
-      // Update to handle both 'url' and 'video_url' fields
       if (status.url) {
         setVideoUrl(status.url);
       } else if (status.video_url) {
@@ -477,6 +476,9 @@ function App() {
                                   </div>
                                   <span className="text-sm text-gray-600">
                                     {Math.round(progress)}%
+                                  </span>
+                                  <span className="ml-3 text-sm text-gray-500">
+                                    Query submitted successfully. Due to high demand, processing may take a few minutes.
                                   </span>
                                 </div>
                               </div>
