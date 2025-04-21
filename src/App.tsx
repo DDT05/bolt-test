@@ -671,13 +671,49 @@ function App() {
       </main>
 
       <footer className="bg-purple-900 text-white py-8 px-6">
-        <div className="max-w-7xl mx-auto flex justify-between items-center">
-          <div className="flex items-center space-x-2">
-            <Play size={20} className="text-purple-200" />
-            <span className="font-semibold">VideoSnap AI</span>
+        <div className="max-w-7xl mx-auto">
+          <div className="flex justify-between items-center mb-8">
+            <div className="flex items-center space-x-2">
+              <Play size={20} className="text-purple-200" />
+              <span className="font-semibold">VideoSnap AI</span>
+            </div>
+            <div className="flex space-x-6">
+              <a href="/privacy" className="text-purple-200 hover:text-white transition-colors">
+                Privacy Policy
+              </a>
+              <a href="/terms" className="text-purple-200 hover:text-white transition-colors">
+                Terms of Use
+              </a>
+              <a href="/refund" className="text-purple-200 hover:text-white transition-colors">
+                Refund Policy
+              </a>
+            </div>
           </div>
-          <div className="text-sm text-purple-200">
-            © 2024 VideoSnap AI. All rights reserved.
+          
+          <div className="border-t border-purple-800 pt-8">
+            <div className="text-sm text-purple-300 space-y-4">
+              <p className="mb-4">Questions? Contact us at contact.hebedai@gmail.com</p>
+              
+              <p className="mb-4">
+                This website uses cookies to analyze and improve user experience. 
+                By using this website, you expressly consent to the processing of your data 
+                by our software under the conditions and for the purposes described above.
+              </p>
+              
+              <p className="mb-4">
+                For more information, please consult our Terms of Service
+              </p>
+              
+              <p>
+                This website is not part of the Facebook website or Facebook Inc.
+                Additionally, this site is NOT endorsed by Facebook in any way.
+                FACEBOOK is a trademark of Facebook, Inc.
+              </p>
+              
+              <p className="mt-6">
+                © 2024 VideoSnap AI. All rights reserved.
+              </p>
+            </div>
           </div>
         </div>
       </footer>
